@@ -61,7 +61,7 @@ end
 local function ProcMoveTo(self, waypoint)
 	self.PathState.COMPLETED = false
 	if waypoint.Action == Enum.PathWaypointAction.Jump then
-		--self.Humanoid.Jump = true
+		self.Humanoid.Jump = true
 	end
 	self.Humanoid:MoveTo(NeutralizePosition(self, waypoint.Position))
 end
