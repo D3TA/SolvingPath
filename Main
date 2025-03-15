@@ -150,6 +150,9 @@ local function ProcMovement(self, targetPosition, targetInstance, coroutineRef)
 				self.PathState.POINT_INDEX += 1
 			end
 		else
+			if self.PathState.WAYPOINTS[1] then
+				ProcMoveTo(self, self.PathState.WAYPOINTS[1])
+			end
 			self.PathState.POINT_INDEX = 1
 		end
 		task.wait()
