@@ -1,0 +1,231 @@
+--[[
+    Minimal Chase PathfindingService
+    
+    Core features:
+    - Simple periodic path recalculation
+    - Basic stuck detection
+    - Efficient waypoint following
+    - Compatible with the original PathfindingService interface
+]]
+
+local ChasePathfindingService = ({});
+local RealPathfindingService = game:GetService("PathfindingService")
+ChasePathfindingService.__index = ChasePathfindingService;
+
+function ChasePathfindingService.new(Model:Model, AgentParams)
+	local self = {}
+	self = {
+		Model = Model;
+		HumanoidRootPart = Model.PrimaryPart;
+		Humanoid = Model:FindFirstChildWhichIsA("Humanoid");
+		Path = RealPathfindingService:CreatePath(AgentParams);
+		DEBUG = true;
+		PathState = {
+			WAYPOINTS = {};
+			POINT_INDEX = 2;
+			COMPLETED = false;
+			PROC_COMPLETED = false;
+			currentMovementCoroutine = nil;
+			lastPathUpdateTime = 0;
+			lastPosition = nil;
+		};
+
+		-- Minimal chase settings
+		ChaseSettings = {
+			RECALC_INTERVAL = 1.0, -- How often to recalculate path (seconds)
+			WAYPOINT_REACH_DISTANCE = 4, -- How close to consider a waypoint reached
+		}
+	}
+
+	-- Store original agent parameters
+	self.OriginalAgentParams = AgentParams
+
+	return setmetatable(self, ChasePathfindingService)
+end
+
+-- Utility functions
+function ChasePathfindingService:GetHumanoidPosition()
+	return self.HumanoidRootPart.Position
+end
+
+function ChasePathfindingService:GetHumanoidFootPosition()
+	return self.HumanoidRootPart.Position - Vector3.new(0, self.Humanoid.HipHeight, 0)
+end
+
+-- Helper functions
+local function NeutralizePosition(self, position)
+	return Vector3.new(position.X, self:GetHumanoidPosition().Y, position.Z)
+end
+
+-- Movement processing functions
+local function ProcMoveTo(self, waypoint)
+	self.PathState.COMPLETED = false
+	if waypoint.Action == Enum.PathWaypointAction.Jump then
+		--self.Humanoid.Jump = true
+	end
+	self.Humanoid:MoveTo(NeutralizePosition(self, waypoint.Position))
+end
+
+local function ProcMovement(self, targetPosition, targetInstance, coroutineRef)
+	self.PathState.PROC_COMPLETED = false
+
+	while true do
+		-- Check if this is still the active coroutine
+		if self.currentMovementCoroutine ~= coroutineRef then
+			coroutine.yield()
+		end
+
+		-- Update target position if we're chasing an instance
+		local currentTargetPosition = targetPosition
+		if targetInstance then
+			if targetInstance:IsA("BasePart") then
+				currentTargetPosition = targetInstance.Position
+			elseif targetInstance:IsA("Model") and targetInstance.PrimaryPart then
+				currentTargetPosition = targetInstance.PrimaryPart.Position
+			elseif targetInstance:IsA("Player") and 
+				targetInstance.Character and 
+				targetInstance.Character:FindFirstChild("HumanoidRootPart") then
+				currentTargetPosition = targetInstance.Character.HumanoidRootPart.Position
+			end
+		end
+
+		-- Compute new path
+		if not self.Path then
+			self.Path = RealPathfindingService:CreatePath(self.OriginalAgentParams)
+		end
+
+		self.Path:ComputeAsync(self:GetHumanoidFootPosition(), currentTargetPosition)
+
+		local waypoints = self.Path:GetWaypoints()
+
+		local optimizedVectors = table.clone(waypoints);
+		for i = #optimizedVectors, 1, -1 do
+			if optimizedVectors[i - 1] then
+				local last = optimizedVectors[i - 1].Position;
+				local vector = optimizedVectors[i].Position;
+				if (last and vector and (vector - last).Magnitude <= 0.2) then
+					table.remove(optimizedVectors, i);
+				end
+			end
+		end
+
+		waypoints = optimizedVectors
+
+		-- Skip the first waypoint (current position)
+		local processedWaypoints = {}
+		for i, waypoint in pairs(waypoints) do
+			if i > 1 then
+				processedWaypoints[i - 1] = waypoint
+			end
+		end
+
+		-- Update path state
+		self.PathState.WAYPOINTS = processedWaypoints
+
+		-- Create debug visualization if needed
+		if self.DEBUG then
+			if not workspace:FindFirstChild("DEBUG") then
+				Instance.new("Folder", workspace).Name = "DEBUG"
+			else
+				workspace:WaitForChild("DEBUG"):ClearAllChildren()
+			end
+
+			for _, waypoint in pairs(self.PathState.WAYPOINTS) do
+				local debugPart = Instance.new("Part")
+				debugPart.Material = "Neon"
+				debugPart.Size = Vector3.new(0.5, 0.5, 0.5)
+				debugPart.Position = waypoint.Position
+				debugPart.Anchored = true
+				debugPart.CanCollide = false
+				debugPart.Parent = workspace:WaitForChild("DEBUG")
+			end
+		end
+
+		if self.PathState.POINT_INDEX  + 1 <= #self.PathState.WAYPOINTS  then
+			local currentWaypoint = self.PathState.WAYPOINTS[self.PathState.POINT_INDEX + 1]
+
+			ProcMoveTo(self, currentWaypoint)
+			local distanceToWaypoint = (NeutralizePosition(self, currentWaypoint.Position) - self:GetHumanoidPosition()).Magnitude
+			if distanceToWaypoint <= self.ChaseSettings.WAYPOINT_REACH_DISTANCE then
+				self.PathState.POINT_INDEX += 1
+			end
+		else
+			self.PathState.POINT_INDEX = 1
+		end
+		task.wait()
+	end
+end
+
+-- Main chase function
+function ChasePathfindingService:ChaseTarget(target)
+	-- Stop any existing movement
+
+	-- Reset path state
+	self.PathState.WAYPOINTS = {}
+	self.PathState.COMPLETED = false
+	self.PathState.PROC_COMPLETED = false
+
+	if os.clock() - self.PathState.lastPathUpdateTime >= self.ChaseSettings.RECALC_INTERVAL then
+		self.PathState.lastPathUpdateTime = os.clock()
+		local newCoroutine = coroutine.create(ProcMovement)
+		self.currentMovementCoroutine = newCoroutine
+
+		if typeof(target) == "Instance" then
+			if target:IsA("Player") then
+				-- Chase player
+				coroutine.resume(newCoroutine, self, target.Character and 
+					target.Character:FindFirstChild("HumanoidRootPart") and 
+					target.Character.HumanoidRootPart.Position or Vector3.new(0,0,0), target, newCoroutine)
+			elseif target:IsA("Model") then
+				-- Chase model
+				coroutine.resume(newCoroutine, self, target.PrimaryPart and 
+					target.PrimaryPart.Position or Vector3.new(0,0,0), target, newCoroutine)
+			elseif target:IsA("BasePart") then
+				-- Chase part
+				coroutine.resume(newCoroutine, self, target.Position, target, newCoroutine)
+			else
+				warn("ChasePathfindingService: Invalid target instance type")
+			end
+		elseif typeof(target) == "Vector3" then
+			-- Chase position
+			coroutine.resume(newCoroutine, self, target, nil, newCoroutine)
+		else
+			warn("ChasePathfindingService: Invalid target type")
+		end
+	end
+end
+
+-- Keep MoveTo for backward compatibility, but redirect to ChaseTarget
+function ChasePathfindingService:MoveTo(target)
+	self:ChaseTarget(target)
+end
+
+function ChasePathfindingService:Stop()
+	if workspace:FindFirstChild("DEBUG") then
+		workspace:FindFirstChild("DEBUG"):ClearAllChildren()
+	end
+	self.Humanoid:MoveTo(self:GetHumanoidPosition())
+	self.PathState.WAYPOINTS = {}
+	self.PathState.COMPLETED = false
+	self.PathState.PROC_COMPLETED = false
+	self.PathState.lastPathUpdateTime = 0
+	if typeof(self.currentMovementCoroutine) == "thread" then
+		coroutine.close(self.currentMovementCoroutine)
+	end
+end
+
+-- Configure chase settings
+function ChasePathfindingService:ConfigureChase(settings)
+	for key, value in pairs(settings) do
+		if self.ChaseSettings[key] ~= nil then
+			self.ChaseSettings[key] = value
+		end
+	end
+end
+
+-- Enable/disable debug visualization
+function ChasePathfindingService:SetDebug(enabled)
+	self.DEBUG = enabled
+end
+
+return ChasePathfindingService
